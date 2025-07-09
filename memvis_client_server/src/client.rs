@@ -1,6 +1,6 @@
 use std::{
     env,
-    io::{Write, BufRead, BufReader, stdout},
+    io::{stdout, Read, Write},
     net::{TcpStream, SocketAddr},
     process,
 };
@@ -12,7 +12,32 @@ use crossterm::{
     terminal::{enable_raw_mode, disable_raw_mode, Clear, ClearType},
 };
 
-/// Validates and retrieves the server address and PID from command-line arguments
+use prost::Message;
+
+mod proto {
+    include!(concat!(env!("OUT_DIR"), "/memory.rs"));
+}
+
+use proto::{Command, MemoryDump};
+use proto::command::CommandType;
+
+const DUMP_BUFFER_SIZE: usize = 4096;
+const REFRESH_KEY_UP: CommandType = CommandType::Up;
+const REFRESH_KEY_DOWN: CommandType = CommandType::Down;
+const INIT_COMMAND: CommandType = CommandType::Pid;
+
+fn print_aligned_line(args: std::fmt::Arguments) {
+    let mut out = stdout();
+    write!(out, "\r{}\n", args).unwrap();
+    out.flush().unwrap();
+}
+
+macro_rules! println_aligned {
+    ($($arg:tt)*) => {
+        print_aligned_line(format_args!($($arg)*))
+    };
+}
+
 fn get_arguments() -> (SocketAddr, u32) {
     let args: Vec<String> = env::args().collect();
 
@@ -21,92 +46,78 @@ fn get_arguments() -> (SocketAddr, u32) {
         process::exit(1);
     }
 
-    let address = match args[1].parse::<SocketAddr>() {
-        Ok(addr) => addr,
-        Err(e) => {
-            eprintln!("❌ Invalid address '{}': {}", args[1], e);
-            process::exit(1);
-        }
-    };
+    let address = args[1].parse().unwrap_or_else(|e| {
+        eprintln!("❌ Invalid address '{}': {}", args[1], e);
+        process::exit(1);
+    });
 
-    let pid = match args[2].parse::<u32>() {
-        Ok(pid) => pid,
-        Err(_) => {
-            eprintln!("❌ PID must be a positive integer");
-            process::exit(1);
-        }
-    };
+    let pid = args[2].parse().unwrap_or_else(|_| {
+        eprintln!("❌ PID must be a positive integer");
+        process::exit(1);
+    });
 
     (address, pid)
 }
 
-/// Handles interactive memory navigation
+fn send_command(stream: &mut TcpStream, command_type: CommandType, pid: u32) -> std::io::Result<()> {
+    let command = Command {
+        command_type: command_type as i32,
+        pid,
+    };
+
+    let mut buf = Vec::new();
+    command.encode(&mut buf)?;
+    stream.write_all(&buf)?;
+    Ok(())
+}
+
+fn read_memory_dump(stream: &mut TcpStream) -> Option<MemoryDump> {
+    let mut buffer = vec![0; DUMP_BUFFER_SIZE];
+    let size = stream.read(&mut buffer).ok()?;
+    MemoryDump::decode(&buffer[..size]).ok()
+}
+
 fn handle_input(stream: &mut TcpStream, pid: u32) {
-    // Send PID to server
-    stream.write_all(format!("PID {}\n", pid).as_bytes()).unwrap();
-
-    // Read and discard server handshake message
-    let reader = BufReader::new(stream.try_clone().unwrap());
-    for line in reader.lines() {
-        match line {
-            Ok(text) => {
-                if text == "END" {
-                    break;
-                }
-                // Optional: silently discard or log the message
-            }
-            Err(e) => {
-                eprintln!("Handshake failed: {}", e);
-                return;
-            }
-        }
-    }
-
-    // Now that handshake is complete, show instructions
-    println!("Use ↑/↓ to navigate memory. Press 'q' to quit.");
-
+    send_command(stream, INIT_COMMAND, pid).unwrap();
+    println_aligned!("Use ↑/↓ to navigate memory. Press 'q' to quit.\n");
 
     enable_raw_mode().expect("Failed to enable raw mode");
 
     loop {
-        // Listen for key events
-        if let Event::Key(key_event) = event::read().unwrap() {
-            let command = match key_event.code {
-                KeyCode::Up => Some("UP\n"),
-                KeyCode::Down => Some("DOWN\n"),
-                KeyCode::Char('q') => {
-                    println!("Exiting...");
+        if let Event::Key(event) = event::read().unwrap() {
+            let command = match event.code {
+                KeyCode::Up => Some(REFRESH_KEY_UP),
+                KeyCode::Down => Some(REFRESH_KEY_DOWN),
+                KeyCode::Char('q') | KeyCode::Char('Q') => {
+                    println_aligned!("Exiting...");
                     break;
                 }
                 _ => None,
             };
 
-            if let Some(cmd) = command {
-                // Send command to server
-                if let Err(e) = stream.write_all(cmd.as_bytes()) {
-                    eprintln!("Failed to send command: {}", e);
-                    break;
-                }
+            if let Some(cmd_type) = command {
+                send_command(stream, cmd_type, pid).unwrap();
 
-                // Clear screen before showing updated memory
                 execute!(stdout(), Clear(ClearType::All), MoveTo(0, 0)).unwrap();
 
-                let reader = BufReader::new(stream.try_clone().unwrap());
+                if let Some(dump) = read_memory_dump(stream) {
+                    println_aligned!("{}", dump.status);
 
-                // Print each line until "END"
-                for line in reader.lines() {
-                    match line {
-                        Ok(text) => {
-                            if text == "END" {
-                                break;
-                            }
-                            print!("{}\r\n", text);
-                        }
-                        Err(e) => {
-                            eprintln!("Failed to read line: {}", e);
-                            break;
-                        }
+                    println_aligned!(
+                        "Region [{}] 0x{:X} - 0x{:X} | Name: {}",
+                        dump.region_index,
+                        dump.region_start,
+                        dump.region_end,
+                        dump.region_name
+                    );
+
+                    for line in dump.lines.iter() {
+                        let clean = line.trim_end_matches(&['\r', '\n'][..]);
+                        println_aligned!("{}", clean)
                     }
+
+                } else {
+                    println_aligned!("Failed to decode memory dump.");
                 }
             }
         }
@@ -115,17 +126,13 @@ fn handle_input(stream: &mut TcpStream, pid: u32) {
     disable_raw_mode().expect("Failed to disable raw mode");
 }
 
-/// Main entry point
 fn main() {
     let (address, pid) = get_arguments();
 
-    let mut stream = match TcpStream::connect(address) {
-        Ok(stream) => stream,
-        Err(e) => {
-            eprintln!("❌ Failed to connect to server at {}: {}", address, e);
-            process::exit(1);
-        }
-    };
+    let mut stream = TcpStream::connect(address).unwrap_or_else(|e| {
+        eprintln!("❌ Failed to connect to server at {}: {}", address, e);
+        process::exit(1);
+    });
 
     handle_input(&mut stream, pid);
 }

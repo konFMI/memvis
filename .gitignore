@@ -1,2 +1,8 @@
 bin\
 obj\
+
+# Ignore target folders from all nested crates
+**/target/
+**/Cargo.lock
+
+main.cpp

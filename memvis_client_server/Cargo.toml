@@ -13,3 +13,9 @@ path = "src/client.rs"
 
 [dependencies]
 crossterm = "0.27"
+prost = "0.12"
+prost-types = "0.12"
+bytes = "1"
+
+[build-dependencies]
+prost-build = "0.12"

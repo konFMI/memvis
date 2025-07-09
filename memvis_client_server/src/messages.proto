@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+package memory;
+
+// Client-to-server command
+message Command {
+  enum CommandType {
+    UNKNOWN = 0;
+    PID = 1;
+    UP = 2;
+    DOWN = 3;
+  }
+  CommandType command_type = 1; // Renamed from `type`
+  uint32 pid = 2; // Used when command_type == PID
+}
+
+// Server-to-client memory dump
+message MemoryDump {
+  string status = 1;
+  string region_name = 2;
+  uint32 region_index = 3;
+  uint64 region_start = 4;
+  uint64 region_end = 5;
+  repeated string lines = 6;
+}
+
+// Optional error message
+message Error {
+  string message = 1;
+}
