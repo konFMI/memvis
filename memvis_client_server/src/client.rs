@@ -101,6 +101,14 @@ fn handle_input(stream: &mut TcpStream, pid: u32) {
                 execute!(stdout(), Clear(ClearType::All), MoveTo(0, 0)).unwrap();
 
                 if let Some(dump) = read_memory_dump(stream) {
+                    if dump.status.contains("Insufficient permission") {
+                        println_aligned!("{}", dump.status);
+                        println_aligned!("Client exiting due to insufficient rights.");
+                        disable_raw_mode().expect("Failed to disable raw mode");
+                        println_aligned!("");
+                        process::exit(1);
+                    }
+
                     println_aligned!("{}", dump.status);
 
                     println_aligned!(
@@ -124,6 +132,7 @@ fn handle_input(stream: &mut TcpStream, pid: u32) {
     }
 
     disable_raw_mode().expect("Failed to disable raw mode");
+    println_aligned!("");
 }
 
 fn main() {

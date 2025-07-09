@@ -88,14 +88,15 @@ fn format_memory_chunk(address: usize, data: &[u8]) -> Vec<String> {
 }
 
 // 🧠 Read memory from /proc/<pid>/mem
-fn read_memory(pid: u32, address: usize, size: usize) -> Option<Vec<u8>> {
+fn read_memory(pid: u32, address: usize, size: usize) -> Result<Vec<u8>, std::io::Error> {
     let path = format!("/proc/{}/mem", pid);
-    let mut file = File::open(path).ok()?;
-    file.seek(std::io::SeekFrom::Start(address as u64)).ok()?;
+    let mut file = File::open(path)?;
+    file.seek(std::io::SeekFrom::Start(address as u64))?;
     let mut buffer = vec![0; size];
-    file.read_exact(&mut buffer).ok()?;
-    Some(buffer)
+    file.read_exact(&mut buffer)?;
+    Ok(buffer)
 }
+
 
 // ↕️ Update client state based on command
 fn process_command(cmd: i32, state: &mut ClientState) {
@@ -129,24 +130,45 @@ fn send_memory_dump(state: &ClientState, stream: &mut TcpStream) -> std::io::Res
     let (start, end, name) = &state.mem_regions[state.region_index];
     let address = start + state.offset_within_region;
 
-    if let Some(data) = read_memory(state.pid, address, CHUNK_SIZE) {
-        let region_size = end - start;
-        let progress = address - start;
-        let percent = ((progress as f64 / region_size as f64) * 100.0).round();
+    match read_memory(state.pid, address, CHUNK_SIZE) {
+        Ok(data) => {
+            let region_size = end - start;
+            let progress = address - start;
+            let percent = ((progress as f64 / region_size as f64) * 100.0).round();
 
-        let dump = MemoryDump {
-            status: format!("Progress: {:.0}% | Offset: {} / {} bytes", percent, progress, region_size),
-            region_name: name.clone(),
-            region_index: state.region_index as u32,
-            region_start: *start as u64,
-            region_end: *end as u64,
-            lines: format_memory_chunk(address, &data),
-        };
+            let dump = MemoryDump {
+                status: format!("Progress: {:.0}% | Offset: {} / {} bytes", percent, progress, region_size),
+                region_name: name.clone(),
+                region_index: state.region_index as u32,
+                region_start: *start as u64,
+                region_end: *end as u64,
+                lines: format_memory_chunk(address, &data),
+            };
 
-        let mut buf = Vec::new();
-        dump.encode(&mut buf)?;
-        stream.write_all(&buf)?;
+            let mut buf = Vec::new();
+            dump.encode(&mut buf)?;
+            stream.write_all(&buf)?;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            let error_msg = format!("🚫 Insufficient permission to read memory of PID {}. Run with sudo or check access rights.", state.pid);
+            let dump = MemoryDump {
+                status: error_msg.clone(),  // clone here
+                region_name: String::new(),
+                region_index: 0,
+                region_start: 0,
+                region_end: 0,
+                lines: vec![],
+            };
+            let mut buf = Vec::new();
+            dump.encode(&mut buf)?;
+            stream.write_all(&buf)?;
+            eprintln!("{}", error_msg);      // original still usable
+        }
+        Err(e) => {
+            eprintln!("Failed to read memory: {}", e);
+        }
     }
+
 
     Ok(())
 }
