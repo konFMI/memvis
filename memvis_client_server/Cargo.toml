@@ -1,0 +1,15 @@
+[package]
+name = "memvis_lient_server"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "memvis_server"
+path = "src/server.rs"
+
+[[bin]]
+name = "memvis_client"
+path = "src/client.rs"
+
+[dependencies]
+crossterm = "0.27"
